@@ -629,6 +629,14 @@ class VideoTracker:
         self.quality_assessor = QualityMetrics()
         self.occlusion_detector = OcclusionDetector()
         
+        # BBOX SIZE CONTROL - NEW!
+        self.original_bbox_size = None  # Store original target size
+        self.bbox_size_history = deque(maxlen=10)  # Track size changes
+        self.max_size_growth = 1.5  # Maximum allowed size growth (50%)
+        self.max_size_shrink = 0.7  # Minimum allowed size shrink (30%)
+        self.template_update_threshold = 0.8  # Update template when confidence is high
+        self.frames_since_template_update = 0
+        
         # UI and control state
         self.selecting = False
         self.selection_start = None
@@ -767,6 +775,11 @@ class VideoTracker:
         x, y, w, h = validation_result['corrected_bbox']
         self.target_bbox = (x, y, w, h)
         
+        # STORE ORIGINAL SIZE FOR DRIFT CONTROL
+        self.original_bbox_size = (w, h)
+        self.bbox_size_history.clear()
+        self.frames_since_template_update = 0
+        
         # Initialize tracker
         try:
             self.tracker = cv2.TrackerCSRT_create()
@@ -888,13 +901,24 @@ class VideoTracker:
         success, new_bbox = self.tracker.update(frame)
         
         if success and self._is_bbox_valid(new_bbox, frame.shape):
-            # Successful tracking!
-            self.target_bbox = tuple(map(int, new_bbox))
+            # APPLY SIZE CONTROL TO PREVENT BBOX DRIFT
+            size_controlled_bbox = self._validate_bbox_size_change(new_bbox, frame.shape)
+            self.target_bbox = tuple(map(int, size_controlled_bbox))
+            
+            # Detect and warn about size drift
+            if self._detect_size_drift():
+                print("[WARNING] Bbox size drift detected - applying stricter controls")
+                self.max_size_growth = min(1.3, self.max_size_growth - 0.1)
+                self.max_size_shrink = max(0.8, self.max_size_shrink + 0.1)
             
             # Adaptive confidence calculation
             base_confidence = 0.8 if success else 0.0
             quality_bonus = quality['overall_quality'] * 0.2
             self.confidence = min(1.0, base_confidence + quality_bonus)
+            
+            # UPDATE TEMPLATE IF CONDITIONS ARE MET
+            if self._should_update_template(self.confidence):
+                self._update_template_with_size_control(frame, self.target_bbox)
             
             # Update occlusion detector with good state
             self.occlusion_detector.update_last_good_state(self.target_bbox, self.detector.template)
@@ -1339,12 +1363,16 @@ class VideoTracker:
             print(f"[RECOVERY] Search successful! Score: {best_score:.2f} (Performance: {performance_level})")
     
     def _attempt_recovery(self, frame: np.ndarray, found_match: Tuple):
-        """Attempt to recover tracking from found match"""
+        """Attempt to recover tracking from found match with size control"""
         found_bbox = found_match[:4]
         confidence = found_match[4]
         
         # Validate and clamp the found match
         if self._is_bbox_valid(found_bbox, frame.shape):
+            # APPLY SIZE CONTROL TO RECOVERY
+            if self.original_bbox_size:
+                found_bbox = self._validate_size_for_recovery(found_bbox)
+            
             # CRITICAL: Clamp bbox to ensure it's within frame boundaries
             found_bbox = self._clamp_bbox(found_bbox, frame.shape)
             
@@ -1500,6 +1528,14 @@ class VideoTracker:
         self.predictor = MotionPredictor()
         self.occlusion_detector = OcclusionDetector()
         self.previous_confidence = 1.0
+        
+        # RESET SIZE CONTROL
+        self.original_bbox_size = None
+        self.bbox_size_history.clear()
+        self.max_size_growth = 1.5  # Reset to defaults
+        self.max_size_shrink = 0.7
+        self.frames_since_template_update = 0
+        
         print("[RESET] Tracking system reset. Ready for new target selection.")
     
     def _show_context_menu(self, x: int, y: int):
@@ -1731,13 +1767,24 @@ class VideoTracker:
             cv2.putText(frame, f"CONFIDENCE: {self.confidence:.3f}", (w - 250, 50),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
             
-            cv2.putText(frame, f"LOST FRAMES: {self.lost_frame_count}", (w - 250, 70),
+            # SHOW BBOX SIZE INFO
+            bbox_w, bbox_h = self.target_bbox[2], self.target_bbox[3]
+            if self.original_bbox_size:
+                orig_w, orig_h = self.original_bbox_size
+                size_ratio = ((bbox_w * bbox_h) / (orig_w * orig_h)) ** 0.5
+                cv2.putText(frame, f"SIZE: {bbox_w}x{bbox_h} ({size_ratio:.2f}x)", (w - 250, 70),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+            else:
+                cv2.putText(frame, f"SIZE: {bbox_w}x{bbox_h}", (w - 250, 70),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+            
+            cv2.putText(frame, f"LOST FRAMES: {self.lost_frame_count}", (w - 250, 90),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
             
-            cv2.putText(frame, f"RECOVERIES: {self.session_stats['recovery_count']}", (w - 250, 90),
+            cv2.putText(frame, f"RECOVERIES: {self.session_stats['recovery_count']}", (w - 250, 110),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
             
-            cv2.putText(frame, f"AVG CONFIDENCE: {self.session_stats['average_confidence']:.3f}", (w - 250, 110),
+            cv2.putText(frame, f"AVG CONFIDENCE: {self.session_stats['average_confidence']:.3f}", (w - 250, 130),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
     
     def _draw_confidence_graph(self, frame: np.ndarray):
@@ -2066,6 +2113,160 @@ class VideoTracker:
         
         print("="*72)
         print("Thank you for using the Advanced Video Tracking System!")
+    
+    def _validate_bbox_size_change(self, new_bbox, frame_shape) -> Tuple[int, int, int, int]:
+        """Prevent bbox size drift and validate size changes"""
+        if not self.original_bbox_size or not self.target_bbox:
+            return new_bbox
+            
+        x, y, w, h = new_bbox
+        original_w, original_h = self.original_bbox_size
+        
+        # Calculate size change ratios
+        width_ratio = w / original_w
+        height_ratio = h / original_h
+        
+        # Clamp size changes to prevent drift
+        if width_ratio > self.max_size_growth:
+            w = int(original_w * self.max_size_growth)
+            print(f"[SIZE CONTROL] Width growth limited to {self.max_size_growth:.1f}x")
+        elif width_ratio < self.max_size_shrink:
+            w = int(original_w * self.max_size_shrink)
+            print(f"[SIZE CONTROL] Width shrink limited to {self.max_size_shrink:.1f}x")
+            
+        if height_ratio > self.max_size_growth:
+            h = int(original_h * self.max_size_growth)
+            print(f"[SIZE CONTROL] Height growth limited to {self.max_size_growth:.1f}x")
+        elif height_ratio < self.max_size_shrink:
+            h = int(original_h * self.max_size_shrink)
+            print(f"[SIZE CONTROL] Height shrink limited to {self.max_size_shrink:.1f}x")
+        
+        # Keep center position, adjust coordinates
+        center_x = x + new_bbox[2] // 2
+        center_y = y + new_bbox[3] // 2
+        x = center_x - w // 2
+        y = center_y - h // 2
+        
+        # Ensure it's still within frame
+        corrected_bbox = self._clamp_bbox((x, y, w, h), frame_shape)
+        
+        # Track size history for analysis
+        self.bbox_size_history.append((w, h))
+        
+        return corrected_bbox
+    
+    def _should_update_template(self, confidence: float) -> bool:
+        """Decide if template should be updated based on confidence and time"""
+        self.frames_since_template_update += 1
+        
+        # Update template if:
+        # 1. High confidence tracking
+        # 2. Enough frames have passed since last update
+        # 3. Not in prediction/recovery mode
+        if (confidence > self.template_update_threshold and 
+            self.frames_since_template_update > 30 and 
+            self.state == TrackingState.TRACKING):
+            return True
+        
+        # Force update after too many frames to prevent template staleness
+        if self.frames_since_template_update > 120:
+            return True
+            
+        return False
+    
+    def _update_template_with_size_control(self, frame: np.ndarray, bbox: Tuple[int, int, int, int]):
+        """Update template while maintaining size consistency"""
+        try:
+            x, y, w, h = bbox
+            
+            # Ensure bbox is valid for template extraction
+            if (x >= 0 and y >= 0 and x + w <= frame.shape[1] and y + h <= frame.shape[0] and w > 10 and h > 10):
+                # Extract new template
+                new_template_area = frame[y:y+h, x:x+w]
+                
+                # Check template quality before updating
+                quality = self.quality_assessor.analyze_image_quality(new_template_area)
+                
+                if quality['overall_quality'] > 0.5:  # Only update with good quality templates
+                    self.detector.set_template(frame, bbox)
+                    self.frames_since_template_update = 0
+                    print(f"[TEMPLATE] Updated with quality {quality['overall_quality']:.2f}")
+                else:
+                    print(f"[TEMPLATE] Skipped update - low quality {quality['overall_quality']:.2f}")
+            else:
+                print("[TEMPLATE] Skipped update - invalid bbox")
+                
+        except Exception as e:
+            print(f"[TEMPLATE] Update failed: {e}")
+    
+    def _detect_size_drift(self) -> bool:
+        """Detect if bbox size is drifting over time"""
+        if len(self.bbox_size_history) < 5:
+            return False
+            
+        sizes = list(self.bbox_size_history)
+        recent_sizes = sizes[-3:]
+        older_sizes = sizes[-6:-3] if len(sizes) >= 6 else sizes[:-3]
+        
+        if not older_sizes:
+            return False
+            
+        # Calculate average size change
+        recent_avg_w = sum(s[0] for s in recent_sizes) / len(recent_sizes)
+        recent_avg_h = sum(s[1] for s in recent_sizes) / len(recent_sizes)
+        older_avg_w = sum(s[0] for s in older_sizes) / len(older_sizes)
+        older_avg_h = sum(s[1] for s in older_sizes) / len(older_sizes)
+        
+        # Check for significant drift
+        width_drift = abs(recent_avg_w - older_avg_w) / older_avg_w
+        height_drift = abs(recent_avg_h - older_avg_h) / older_avg_h
+        
+        # If either dimension drifts more than 20%, consider it drift
+        return width_drift > 0.2 or height_drift > 0.2
+    
+    def _validate_size_for_recovery(self, found_bbox: Tuple[int, int, int, int]) -> Tuple[int, int, int, int]:
+        """Validate recovered bbox size against original target size"""
+        if not self.original_bbox_size:
+            return found_bbox
+            
+        x, y, w, h = found_bbox
+        original_w, original_h = self.original_bbox_size
+        
+        # Calculate size ratios
+        width_ratio = w / original_w
+        height_ratio = h / original_h
+        
+        # More permissive limits for recovery (object might be at different distance)
+        max_recovery_growth = 2.0  # Allow 2x growth for recovery
+        min_recovery_shrink = 0.5  # Allow 50% shrink for recovery
+        
+        size_adjusted = False
+        
+        # Adjust width if outside reasonable bounds
+        if width_ratio > max_recovery_growth:
+            w = int(original_w * max_recovery_growth)
+            size_adjusted = True
+        elif width_ratio < min_recovery_shrink:
+            w = int(original_w * min_recovery_shrink)
+            size_adjusted = True
+            
+        # Adjust height if outside reasonable bounds  
+        if height_ratio > max_recovery_growth:
+            h = int(original_h * max_recovery_growth)
+            size_adjusted = True
+        elif height_ratio < min_recovery_shrink:
+            h = int(original_h * min_recovery_shrink)
+            size_adjusted = True
+        
+        if size_adjusted:
+            # Keep center position, adjust coordinates
+            center_x = x + found_bbox[2] // 2
+            center_y = y + found_bbox[3] // 2
+            x = center_x - w // 2
+            y = center_y - h // 2
+            print(f"[RECOVERY] Size adjusted to {w}x{h} (was {found_bbox[2]}x{found_bbox[3]})")
+        
+        return (x, y, w, h)
 
 def main():
     """Main function"""
