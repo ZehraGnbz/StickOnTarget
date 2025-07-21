@@ -1,0 +1,21 @@
+# Core video processing
+opencv-python>=4.8.0,<4.9.0
+opencv-contrib-python>=4.8.0,<4.9.0
+
+# Numerical computing
+numpy>=1.24.0,<2.0.0
+
+# Image processing utilities
+imutils>=0.5.4,<1.0.0
+
+# Optional: Performance monitoring
+psutil>=5.9.0
+
+# Optional: Enhanced logging
+colorlog>=6.7.0
+
+# Optional: Configuration management
+PyYAML>=6.0
+
+# Optional: Progress bars
+tqdm>=4.64.0 

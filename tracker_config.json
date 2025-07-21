@@ -1,0 +1,11 @@
+{
+  "max_lost_frames": 30,
+  "max_history": 5,
+  "confidence_threshold": 0.3,
+  "smoothing_factor": 0.7,
+  "re_detection_threshold": 0.6,
+  "ui_scale": 1.0,
+  "show_fps": true,
+  "show_confidence": true,
+  "auto_save_tracking": true
+}
