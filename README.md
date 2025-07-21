@@ -27,13 +27,21 @@ numpy>=1.19.0
 ## Kullanım
 
 ### Temel Kullanım
-```bash
-# Video dosyası ile çalıştırma
-python enhanced_video_tracker.py video_dosyasi.mp4
+## 🎞️ Demo Videolar
 
-# Varsayılan video ile çalıştırma
-python enhanced_video_tracker.py
-```
+Uygulamayı test etmek için aşağıdaki videoları kullanabilirsiniz:
+
+- 🔹 [Shell Game (Cup Shuffle) Demo](https://drive.google.com/file/d/1QnBBzb4QRDlYVGoGSxxPvn-NeR1FdBvX/view?usp=sharing)  
+  Nesne karıştırmalı senaryoda takip kararlılığı.
+
+- 🔹 [Araç Takibi – Drone Görüntüsü](https://drive.google.com/file/d/1AsqwLbTLwZovBVgZehfpG34HNna7kkrA/view?usp=sharing)  
+  Kadraj dışına çıkan ve geri giren araç üzerinde hedef kilidi.
+
+> Bu videoları indirerek `enhanced_video_tracker.py` komutuyla çalıştırabilirsiniz:
+> ```bash
+> python enhanced_video_tracker.py path_to_video.mp4
+> ```
+
 ## 🧠 Advanced Video Tracking System – Görsel Örnekler
 
 > Bu bölümde sistemin farklı senaryolardaki performansını gösteren ekran görüntüleri ve GIF animasyonları yer almaktadır.  
